@@ -45,16 +45,15 @@ Some behavior differs slightly:
 - A ratings read that MDBList changed during the read is retried on the next sync instead of being imported without removals. A ratings read without a shows list imports movie ratings without removals instead of treating them as complete.
 - A play to export that has no IMDb, TMDB, or TVDB ID is reported as not found instead of failing five times first.
 
+When a ratings read is imported without removals, the plugin says why, and Silo shows the reason with the sync run. This needs a Silo server built on silo-plugin-sdk v0.21 or later.
+
 ## Not yet supported
 
-These need a newer plugin contract (silo-plugin-sdk v0.21):
-
-- Sync warnings. The plugin cannot yet tell Silo why it imported ratings without removals, so the sync run shows no warning.
 - Dropped shows. MDBList keeps a dropped-shows list, which neither the built-in provider nor this plugin syncs yet.
 
 ## Development
 
-The plugin builds against `silo-plugin-sdk` v0.20.0.
+The plugin builds against `silo-plugin-sdk` v0.21.0.
 
 ```bash
 make test

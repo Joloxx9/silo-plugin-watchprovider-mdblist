@@ -102,6 +102,13 @@ func TestListRatingsIsNoSnapshotWithoutShowsList(t *testing.T) {
 			if result.fault != nil || result.complete != tc.complete {
 				t.Fatalf("complete = %t fault = %v, want complete %t", result.complete, result.fault, tc.complete)
 			}
+			// An incomplete read says why, so the sync run shows it.
+			if !tc.complete && !slices.Contains(result.warnings, ratingsNoShowsWarning) {
+				t.Fatalf("warnings = %q, want the missing shows list explained", result.warnings)
+			}
+			if tc.complete && len(result.warnings) != 0 {
+				t.Fatalf("warnings = %q, want none for a complete read", result.warnings)
+			}
 		})
 	}
 }
@@ -195,9 +202,12 @@ func TestListRatingsPagesByOffsetUntilTotal(t *testing.T) {
 		t.Fatalf("items = %d, want every rated movie and show", len(result.items))
 	}
 	// Offset pages can shift under a concurrent change, so the read imports
-	// what it saw but claims no snapshot.
+	// what it saw but claims no snapshot, and says why.
 	if result.fault != nil || result.complete {
 		t.Fatalf("complete = %t fault = %v, want an incremental read", result.complete, result.fault)
+	}
+	if !slices.Equal(result.warnings, []string{ratingsOffsetPagedWarning}) {
+		t.Fatalf("warnings = %q, want the offset read explained", result.warnings)
 	}
 }
 
@@ -209,6 +219,8 @@ func TestListRatingsShortOfTotal(t *testing.T) {
 		// wantFault: the traversal claimed a snapshot on its first page, so a
 		// short read fails it instead of leaving titles out.
 		wantFault bool
+		// wantWarnings, when set, are the warnings the read must return.
+		wantWarnings []string
 	}{
 		"cursor read ends short": {
 			pages: map[string]string{
@@ -236,7 +248,8 @@ func TestListRatingsShortOfTotal(t *testing.T) {
 			pages: map[string]string{
 				"|": `{"movies":[],"shows":[],"pagination":{"total":3,"limit":1000,"next_cursor":null}}`,
 			},
-			wantPages: []string{"|"},
+			wantPages:    []string{"|"},
+			wantWarnings: []string{"mdblist ratings read ended after 0 of 3 entries; skipped rating removals"},
 		},
 	}
 	for name, tc := range cases {
@@ -254,6 +267,12 @@ func TestListRatingsShortOfTotal(t *testing.T) {
 			}
 			if result.fault != nil || result.complete || len(result.items) != tc.wantItems {
 				t.Fatalf("complete = %t fault = %v items = %d, want an incremental read of %d", result.complete, result.fault, len(result.items), tc.wantItems)
+			}
+			if len(result.warnings) == 0 {
+				t.Fatal("an incremental read returned no warning explaining it")
+			}
+			if tc.wantWarnings != nil && !slices.Equal(result.warnings, tc.wantWarnings) {
+				t.Fatalf("warnings = %q, want %q", result.warnings, tc.wantWarnings)
 			}
 		})
 	}

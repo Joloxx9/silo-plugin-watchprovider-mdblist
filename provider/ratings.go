@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"strconv"
@@ -29,6 +30,13 @@ const (
 	seenHashSize = 8
 
 	ratingsChangedMessage = "MDBList ratings changed during the sync; the next sync reads them again"
+
+	// The reasons a first page claims no snapshot, reported as sync warnings
+	// with the wording the former built-in provider used.
+	ratingsNoShowsWarning     = "mdblist returned no show ratings list; skipped rating removals"
+	ratingsRepeatedWarning    = "mdblist ratings pages repeated an entry, so ratings changed during the read; skipped rating removals"
+	ratingsOffsetPagedWarning = "mdblist ratings were read by offset, which can skip entries that change during the read; skipped rating removals"
+	ratingsShortReadWarning   = "mdblist ratings read ended after %d of %d entries; skipped rating removals"
 )
 
 type mdblistRatedMovie struct {
@@ -229,11 +237,14 @@ func listRatings(ctx context.Context, client *apiClient, rawToken string) *plugi
 	if err != nil {
 		return listFault(temporaryFault(invalidPaginationPrefix + err.Error()))
 	}
-	unstable := repeated || (!done && state.legacyOffset) || (done && total >= 0 && read < total)
+	offsetPaged := !done && state.legacyOffset
+	shortRead := done && total >= 0 && read < total
+	unstable := repeated || offsetPaged || shortRead
 	snapshot := token.Snapshot
 	switch {
 	case first:
 		snapshot = hasShows && !unstable
+		response.Warnings = ratingSnapshotWarnings(hasShows, repeated, offsetPaged, shortRead, read, total)
 	case snapshot && unstable:
 		return listFault(temporaryFault(ratingsChangedMessage))
 	}
@@ -253,6 +264,24 @@ func listRatings(ctx context.Context, client *apiClient, rawToken string) *plugi
 		response.NextPageToken = encodePageToken(token)
 	}
 	return response
+}
+
+// ratingSnapshotWarnings explains why a first page claimed no snapshot.
+func ratingSnapshotWarnings(hasShows, repeated, offsetPaged, shortRead bool, read, total int) []string {
+	var warnings []string
+	if !hasShows {
+		warnings = append(warnings, ratingsNoShowsWarning)
+	}
+	if repeated {
+		warnings = append(warnings, ratingsRepeatedWarning)
+	}
+	if offsetPaged {
+		warnings = append(warnings, ratingsOffsetPagedWarning)
+	}
+	if shortRead {
+		warnings = append(warnings, fmt.Sprintf(ratingsShortReadWarning, read, total))
+	}
+	return warnings
 }
 
 // ratingRemoteState maps one rated title, and returns the key the read uses

@@ -52,6 +52,7 @@ type traversal struct {
 	complete bool
 	pages    int
 	fault    *pluginv1.WatchSyncFault
+	warnings []string
 }
 
 // listAll follows page tokens to the end of a traversal, or to its first
@@ -86,6 +87,7 @@ func listAllWithKey(t *testing.T, s *Server, kind pluginv1.WatchSyncRemoteStateK
 		}
 		result.complete = response.GetCompleteSnapshot()
 		result.items = append(result.items, response.GetItems()...)
+		result.warnings = append(result.warnings, response.GetWarnings()...)
 		token = response.GetNextPageToken()
 		if token == "" {
 			if response.GetNextCursor() != "" {
