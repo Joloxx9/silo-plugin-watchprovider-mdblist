@@ -497,6 +497,20 @@ func TestSetRatingFailsWhenMDBListRecordsNothing(t *testing.T) {
 	}
 }
 
+// A removal of a rating MDBList no longer holds records nothing, so the
+// zero-count guard must not touch it: reporting that as a failure retries the
+// removal on every sync forever, when the desired state is already reached.
+func TestRemoveRatingWithNothingRecordedIsNoChange(t *testing.T) {
+	s := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, `{"removed":{"movies":0},"not_found":{"movies":1},"errors":[]}`)
+	})
+	movie := movieEvent("m1", removeRating, map[string]string{"imdb": "tt0848228"})
+
+	response := applyEvents(t, s, movie)
+
+	assertStatus(t, response, "m1", statusNoChange)
+}
+
 func TestRemoveRatingSendsIDsOnly(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
