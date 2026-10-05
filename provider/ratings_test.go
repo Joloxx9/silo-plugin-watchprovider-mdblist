@@ -511,6 +511,23 @@ func TestRemoveRatingWithNothingRecordedIsNoChange(t *testing.T) {
 	assertStatus(t, response, "m1", statusNoChange)
 }
 
+// A removal that recorded nothing and reported nothing missing was ignored, so
+// it has to be retried. Exempting every removal from the zero-count guard would
+// report it applied and leave the rating standing on MDBList forever.
+func TestRemoveRatingIgnoredWithoutNotFoundIsRetried(t *testing.T) {
+	s := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, `{"removed":{"movies":0},"not_found":{},"errors":[]}`)
+	})
+	movie := movieEvent("m1", removeRating, map[string]string{"imdb": "tt0848228"})
+
+	response := applyEvents(t, s, movie)
+
+	result := assertStatus(t, response, "m1", statusRetry)
+	if result.GetFault().GetCode() != pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_TEMPORARY {
+		t.Fatalf("m1 fault = %v, want TEMPORARY so the next sync retries", result.GetFault())
+	}
+}
+
 func TestRemoveRatingSendsIDsOnly(t *testing.T) {
 	var gotPath string
 	var gotBody []byte

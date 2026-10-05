@@ -708,10 +708,12 @@ func (c *apiClient) postRatingBatch(
 		switch {
 		case reportedErrors:
 			results.fail(event, temporaryFault("MDBList reported errors for the "+noun+" in the batch"))
-		// Only a set is suspicious when nothing was recorded. A removal of a
-		// rating MDBList no longer holds records nothing by definition, and the
-		// not_found branch below already reconciles it as NO_CHANGE.
-		case !removing && counted && !acted:
+		// Nothing recorded is suspicious unless MDBList said why. A removal of
+		// a rating it no longer holds records nothing and reports the title in
+		// not_found, which the branch below reconciles as NO_CHANGE. A removal
+		// that recorded nothing and reports nothing missing was ignored, so it
+		// has to be retried like an ignored set.
+		case (!removing || !notFound) && counted && !acted:
 			results.fail(event, temporaryFault("MDBList accepted the request but recorded none of the "+noun+" in the batch"))
 		case !notFound:
 			results.set(event, pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED)
