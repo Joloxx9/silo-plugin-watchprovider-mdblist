@@ -17,13 +17,15 @@ import (
 )
 
 // MDBList rates on the integer 1 to 10 scale the plugin contract uses, so
-// ratings pass through unchanged. Only movie and show ratings are read and
-// written: Silo rates movies and series, not seasons or episodes.
+// ratings pass through unchanged. Movie, show and episode ratings are read and
+// written. Season ratings are only counted: the plugin contract has no season
+// media type, so Silo cannot name one and does not rate one.
 
 const (
 	// maxRatingWriteEntries caps the titles in one rating write. MDBList
-	// rejects a write that lists more than 200 shows with a 400; capping movies
-	// and shows together keeps every request under that limit.
+	// rejects a write that lists more than 200 shows with a 400; capping
+	// movies, shows and episodes together keeps every request under that
+	// limit.
 	maxRatingWriteEntries = 200
 
 	// seenHashSize is the size of one entry hash in a ratings page token.
@@ -52,6 +54,64 @@ type mdblistRatedShow struct {
 	Show    mdblistShow `json:"show"`
 }
 
+// mdblistRatedEpisode tolerates both shapes MDBList uses for episode rows:
+// season and number inlined on the row, or nested under an `episode` object.
+// The show is read from either level too, because an episode without its show
+// cannot be addressed when its own IDs are missing.
+type mdblistRatedEpisode struct {
+	RatedAt time.Time
+	Rating  float64
+	Season  int
+	Number  int
+	Title   string
+	IDs     mdblistIDs
+	Show    mdblistShow
+}
+
+func (e *mdblistRatedEpisode) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		RatedAt time.Time       `json:"rated_at"`
+		Rating  float64         `json:"rating"`
+		Season  int             `json:"season"`
+		Number  int             `json:"number"`
+		Title   string          `json:"title"`
+		IDs     mdblistIDs      `json:"ids"`
+		Show    mdblistShow     `json:"show"`
+		Episode *mdblistEpisode `json:"episode"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.RatedAt = raw.RatedAt
+	e.Rating = raw.Rating
+	e.Season = raw.Season
+	e.Number = raw.Number
+	e.Title = raw.Title
+	e.IDs = raw.IDs
+	e.Show = raw.Show
+	if raw.Episode != nil {
+		if e.Season == 0 {
+			e.Season = raw.Episode.Season
+		}
+		if e.Number == 0 {
+			e.Number = raw.Episode.Number
+		}
+		if e.Title == "" {
+			e.Title = raw.Episode.Title
+			if e.Title == "" {
+				e.Title = raw.Episode.Name
+			}
+		}
+		if e.IDs == (mdblistIDs{}) {
+			e.IDs = raw.Episode.IDs
+		}
+		if e.Show == (mdblistShow{}) {
+			e.Show = raw.Episode.Show
+		}
+	}
+	return nil
+}
+
 // ratedEntry is one rated title as decoded, kept with its raw JSON. The raw
 // JSON identifies an entry that maps to no rating row when a read checks its
 // pages for a repeated entry.
@@ -70,14 +130,14 @@ func (e *ratedEntry[T]) UnmarshalJSON(data []byte) error {
 
 // mdblistRatingsResponse is one page of GET /sync/ratings. Shows stays raw so
 // the read can tell a missing shows list from an empty one: a list that is not
-// there cannot say a show is unrated. Seasons and episodes are only counted,
-// because the pagination counts them too.
+// there cannot say a show is unrated. Seasons are only counted, because the
+// pagination counts them and Silo cannot name a season.
 type mdblistRatingsResponse struct {
-	Movies     []ratedEntry[mdblistRatedMovie] `json:"movies"`
-	Shows      json.RawMessage                 `json:"shows"`
-	Seasons    []json.RawMessage               `json:"seasons"`
-	Episodes   []json.RawMessage               `json:"episodes"`
-	Pagination *mdblistRatingsPagination       `json:"pagination"`
+	Movies     []ratedEntry[mdblistRatedMovie]   `json:"movies"`
+	Shows      json.RawMessage                   `json:"shows"`
+	Seasons    []json.RawMessage                 `json:"seasons"`
+	Episodes   []ratedEntry[mdblistRatedEpisode] `json:"episodes"`
+	Pagination *mdblistRatingsPagination         `json:"pagination"`
 }
 
 // mdblistRatingsPagination is the pagination of a ratings page. The schema
@@ -215,13 +275,18 @@ func listRatings(ctx context.Context, client *apiClient, rawToken string) *plugi
 		}
 		see(seenKey)
 	}
-	// Seasons and episodes count toward total too, so a repeated one hides a
-	// skipped entry just the same.
+	for _, entry := range payload.Episodes {
+		episode := entry.value
+		item, seenKey := ratingEpisodeRemoteState(episode, entry.raw)
+		if item != nil {
+			response.Items = append(response.Items, item)
+		}
+		see(seenKey)
+	}
+	// Seasons count toward total too, so a repeated one hides a skipped entry
+	// just the same.
 	for _, raw := range payload.Seasons {
 		see("season entry " + string(raw))
-	}
-	for _, raw := range payload.Episodes {
-		see("episode entry " + string(raw))
 	}
 
 	fetched := len(payload.Movies) + len(shows) + len(payload.Seasons) + len(payload.Episodes)
@@ -333,6 +398,43 @@ func ratingRemoteState(
 	return item, "movie " + key
 }
 
+// ratingEpisodeRemoteState is ratingRemoteState for a rated episode. An
+// episode is identified by its own IMDb, TMDB or TVDB ID when MDBList gives
+// one, and otherwise by its show plus season and number, which is the form
+// episodeKey produces and the one Silo stores against the connection.
+//
+// Silo matches an episode in its catalog by the episode's own external IDs, so
+// a row carrying none is returned without them: Silo then skips it and leaves
+// episodes out of the snapshot, exactly as an unidentified movie or show does.
+func ratingEpisodeRemoteState(
+	episode mdblistRatedEpisode,
+	raw json.RawMessage,
+) (*pluginv1.WatchSyncRemoteState, string) {
+	entryKey := "episode entry " + string(raw)
+	value := providerRating(episode.Rating)
+	if value == 0 {
+		return nil, entryKey
+	}
+	item := &pluginv1.WatchSyncRemoteState{
+		Rating: &pluginv1.WatchSyncRemoteRatingState{Rating: value},
+	}
+	if !episode.RatedAt.IsZero() {
+		item.Rating.RatedAt = timestamppb.New(episode.RatedAt)
+	}
+	key := episodeKey(episode.Show.IDs, episode.Season, episode.Number, episode.IDs)
+	if episode.IDs.IMDb == "" && episode.IDs.TMDB <= 0 && episode.IDs.TVDB <= 0 {
+		if key == "" {
+			key = "unidentified:" + strconv.FormatUint(entryHash(entryKey), 16)
+		}
+		item.ProviderItemKey = key
+		item.Media = episodeMedia(episode.Title, mdblistIDs{}, episode.Show, episode.Season, episode.Number)
+		return item, entryKey
+	}
+	item.ProviderItemKey = key
+	item.Media = episodeMedia(episode.Title, episode.IDs, episode.Show, episode.Season, episode.Number)
+	return item, "episode " + key
+}
+
 // providerRating rounds a rating half up to the 1 to 10 scale and clamps it;
 // 0 means unrated.
 func providerRating(rating float64) int32 {
@@ -390,7 +492,85 @@ type mdblistRatingsPayload struct {
 	Shows  []mdblistRatingEntry `json:"shows,omitempty"`
 }
 
-// writeRatings sets or clears movie and show ratings in requests of at most
+// An episode rating is written inside its show, not as a title of its own:
+// MDBList takes shows[].seasons[].episodes[], addressed by the show's IDs and
+// the two numbers. A top-level "episodes" array is ignored without an error,
+// which reads as a rating that was accepted and never appears.
+type mdblistRatingEpisodeNested struct {
+	Number  int    `json:"number"`
+	Rating  int    `json:"rating,omitempty"`
+	RatedAt string `json:"rated_at,omitempty"`
+}
+
+type mdblistRatingSeasonNested struct {
+	Number   int                          `json:"number"`
+	Episodes []mdblistRatingEpisodeNested `json:"episodes,omitempty"`
+}
+
+type mdblistRatingShowNested struct {
+	IDs     mdblistIDs                  `json:"ids"`
+	Seasons []mdblistRatingSeasonNested `json:"seasons,omitempty"`
+}
+
+// mdblistNestedRatingsPayload is the episode write. It reuses the "shows" key,
+// so it goes in a request of its own rather than beside the flat show entries.
+type mdblistNestedRatingsPayload struct {
+	Shows []mdblistRatingShowNested `json:"shows"`
+}
+
+// episodeRatingTarget is one episode a write names, before grouping.
+type episodeRatingTarget struct {
+	showIDs mdblistIDs
+	season  int
+	number  int
+	rating  int
+	ratedAt string
+}
+
+// episodeRatingTargetFor resolves the show and position MDBList needs, or
+// reports false when the event carries neither. The episode's own IDs are no
+// use here: the write addresses it through its show.
+func episodeRatingTargetFor(event *pluginv1.WatchSyncEvent) (episodeRatingTarget, bool) {
+	media := event.GetMedia()
+	target := episodeRatingTarget{
+		showIDs: idsFromMedia(media.GetSeriesExternalIds()),
+		season:  int(media.GetSeasonNumber()),
+		number:  int(media.GetEpisodeNumber()),
+	}
+	if target.showIDs == (mdblistIDs{}) || target.number <= 0 {
+		return target, false
+	}
+	return target, true
+}
+
+// nestEpisodeRatings groups targets under one entry per show and season, so a
+// season rated episode by episode travels as one show entry.
+func nestEpisodeRatings(targets []episodeRatingTarget) []mdblistRatingShowNested {
+	var shows []mdblistRatingShowNested
+	showAt := map[string]int{}
+	seasonAt := map[string]int{}
+	for _, t := range targets {
+		key := showKey(t.showIDs)
+		si, ok := showAt[key]
+		if !ok {
+			shows = append(shows, mdblistRatingShowNested{IDs: t.showIDs})
+			si = len(shows) - 1
+			showAt[key] = si
+		}
+		seasonKey := key + "|" + strconv.Itoa(t.season)
+		ei, ok := seasonAt[seasonKey]
+		if !ok {
+			shows[si].Seasons = append(shows[si].Seasons, mdblistRatingSeasonNested{Number: t.season})
+			ei = len(shows[si].Seasons) - 1
+			seasonAt[seasonKey] = ei
+		}
+		shows[si].Seasons[ei].Episodes = append(shows[si].Seasons[ei].Episodes,
+			mdblistRatingEpisodeNested{Number: t.number, Rating: t.rating, RatedAt: t.ratedAt})
+	}
+	return shows
+}
+
+// writeRatings sets or clears movie, show and episode ratings in requests of at most
 // maxRatingWriteEntries titles. MDBList replaces an existing rating, so
 // resending one is harmless. Every title of one request shares its outcome:
 //   - a request that reports errors is retried, set or removal;
@@ -404,36 +584,57 @@ func (c *apiClient) writeRatings(ctx context.Context, events []*pluginv1.WatchSy
 	if removing {
 		noun = "rating removals"
 	}
-	type ratingWrite struct {
+	path := "/sync/ratings"
+	if removing {
+		path = "/sync/ratings/remove"
+	}
+
+	type titleWrite struct {
 		event *pluginv1.WatchSyncEvent
 		entry mdblistRatingEntry
 	}
-	writes := make([]ratingWrite, 0, len(events))
+	type episodeWrite struct {
+		event  *pluginv1.WatchSyncEvent
+		target episodeRatingTarget
+	}
+	titles := make([]titleWrite, 0, len(events))
+	episodes := make([]episodeWrite, 0, len(events))
+
 	for _, event := range events {
-		ids, ok := listItemIDs(event)
-		if !ok {
-			results.reject(event, "MDBList rating sync requires a movie or series with an external ID")
-			continue
-		}
-		entry := mdblistRatingEntry{IDs: ids}
+		rating := 0
+		ratedAt := ""
 		if !removing {
 			if event.GetRating() < 1 || event.GetRating() > 10 {
 				results.reject(event, "MDBList ratings must be from 1 to 10")
 				continue
 			}
-			entry.Rating = int(event.GetRating())
-			if ratedAt := event.GetOccurredAt(); ratedAt != nil && ratedAt.CheckValid() == nil && !ratedAt.AsTime().IsZero() {
-				entry.RatedAt = ratedAt.AsTime().UTC().Format(time.RFC3339)
+			rating = int(event.GetRating())
+			if at := event.GetOccurredAt(); at != nil && at.CheckValid() == nil && !at.AsTime().IsZero() {
+				ratedAt = at.AsTime().UTC().Format(time.RFC3339)
 			}
 		}
-		writes = append(writes, ratingWrite{event: event, entry: entry})
+		if event.GetMedia().GetMediaType() == pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE {
+			target, ok := episodeRatingTargetFor(event)
+			if !ok {
+				results.reject(event, "MDBList rating sync requires an episode's series external ID with a season and episode number")
+				continue
+			}
+			target.rating, target.ratedAt = rating, ratedAt
+			episodes = append(episodes, episodeWrite{event: event, target: target})
+			continue
+		}
+		ids, ok := listItemIDs(event)
+		if !ok {
+			results.reject(event, "MDBList rating sync requires a movie or series with an external ID")
+			continue
+		}
+		titles = append(titles, titleWrite{
+			event: event,
+			entry: mdblistRatingEntry{IDs: ids, Rating: rating, RatedAt: ratedAt},
+		})
 	}
-	path := "/sync/ratings"
-	if removing {
-		path = "/sync/ratings/remove"
-	}
-	for start := 0; start < len(writes); start += maxRatingWriteEntries {
-		chunk := writes[start:min(start+maxRatingWriteEntries, len(writes))]
+
+	for chunk := range chunked(titles, maxRatingWriteEntries) {
 		var payload mdblistRatingsPayload
 		sent := make([]*pluginv1.WatchSyncEvent, 0, len(chunk))
 		for _, write := range chunk {
@@ -444,26 +645,77 @@ func (c *apiClient) writeRatings(ctx context.Context, events []*pluginv1.WatchSy
 			}
 			sent = append(sent, write.event)
 		}
-		var response mdblistWriteResponse
-		if err := c.post(ctx, path, payload, &response); err != nil {
-			if fault := failBatch(sent, results, faultFor(err)); fault != nil {
-				return fault
-			}
-			continue
+		if fault := c.postRatingBatch(ctx, path, payload, sent, results, noun, removing); fault != nil {
+			return fault
 		}
-		reportedErrors := !emptyJSONValue(response.Errors)
-		notFound := !emptyJSONValue(response.NotFound)
-		for _, event := range sent {
-			switch {
-			case reportedErrors:
-				results.fail(event, temporaryFault("MDBList reported errors for the "+noun+" in the batch"))
-			case !notFound:
-				results.set(event, pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED)
-			case removing:
-				results.set(event, pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_NO_CHANGE)
-			default:
-				results.fail(event, temporaryFault("MDBList did not accept one or more "+noun+" in the batch"))
+	}
+
+	// Episodes ride in their own request: they reuse the "shows" key, nested
+	// under the season they belong to.
+	for chunk := range chunked(episodes, maxRatingWriteEntries) {
+		targets := make([]episodeRatingTarget, 0, len(chunk))
+		sent := make([]*pluginv1.WatchSyncEvent, 0, len(chunk))
+		for _, write := range chunk {
+			targets = append(targets, write.target)
+			sent = append(sent, write.event)
+		}
+		payload := mdblistNestedRatingsPayload{Shows: nestEpisodeRatings(targets)}
+		if fault := c.postRatingBatch(ctx, path, payload, sent, results, noun, removing); fault != nil {
+			return fault
+		}
+	}
+	return nil
+}
+
+// chunked yields successive slices of at most size elements.
+func chunked[T any](items []T, size int) func(func([]T) bool) {
+	return func(yield func([]T) bool) {
+		for start := 0; start < len(items); start += size {
+			if !yield(items[start:min(start+size, len(items))]) {
+				return
 			}
+		}
+	}
+}
+
+// postRatingBatch sends one rating request and records the outcome every title
+// in it shares.
+//
+// A response that reports counts decides first: MDBList ignores a payload shape
+// it does not recognise without an error, and an "applied" on a request that
+// changed nothing is worse than a retry, because Silo then records the rating
+// as agreed and never sends it again.
+func (c *apiClient) postRatingBatch(
+	ctx context.Context,
+	path string,
+	payload any,
+	sent []*pluginv1.WatchSyncEvent,
+	results *resultSet,
+	noun string,
+	removing bool,
+) *pluginv1.WatchSyncFault {
+	if len(sent) == 0 {
+		return nil
+	}
+	var response mdblistWriteResponse
+	if err := c.post(ctx, path, payload, &response); err != nil {
+		return failBatch(sent, results, faultFor(err))
+	}
+	reportedErrors := !emptyJSONValue(response.Errors)
+	notFound := !emptyJSONValue(response.NotFound)
+	counted, acted := response.counts()
+	for _, event := range sent {
+		switch {
+		case reportedErrors:
+			results.fail(event, temporaryFault("MDBList reported errors for the "+noun+" in the batch"))
+		case counted && !acted:
+			results.fail(event, temporaryFault("MDBList accepted the request but recorded none of the "+noun+" in the batch"))
+		case !notFound:
+			results.set(event, pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_APPLIED)
+		case removing:
+			results.set(event, pluginv1.WatchSyncApplyStatus_WATCH_SYNC_APPLY_STATUS_NO_CHANGE)
+		default:
+			results.fail(event, temporaryFault("MDBList did not accept one or more "+noun+" in the batch"))
 		}
 	}
 	return nil

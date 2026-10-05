@@ -17,8 +17,9 @@ const (
 	setRating    = pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_SET_RATING
 	removeRating = pluginv1.WatchSyncOperation_WATCH_SYNC_OPERATION_REMOVE_RATING
 
-	mediaMovie  = pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE
-	mediaSeries = pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES
+	mediaMovie   = pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_MOVIE
+	mediaSeries  = pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_SERIES
+	mediaEpisode = pluginv1.WatchSyncMediaType_WATCH_SYNC_MEDIA_TYPE_EPISODE
 )
 
 func TestListRatingsUsesCursorPagination(t *testing.T) {
@@ -61,10 +62,19 @@ func TestListRatingsUsesCursorPagination(t *testing.T) {
 	if !result.complete {
 		t.Fatal("a clean cursor read with a shows list should be a complete snapshot")
 	}
-	if len(result.items) != 3 {
-		t.Fatalf("items = %v, want two rated movies and one rated show", result.items)
+	if len(result.items) != 4 {
+		t.Fatalf("items = %v, want two rated movies, one show and one episode", result.items)
 	}
-	avengers, show, heat := result.items[0], result.items[1], result.items[2]
+	avengers, show, episode, heat := result.items[0], result.items[1], result.items[2], result.items[3]
+	// The rated season is counted but never returned: the plugin contract has
+	// no season media type, so Silo cannot name one.
+	if episode.GetMedia().GetMediaType() != mediaEpisode || episode.GetRating().GetRating() != 10 ||
+		episode.GetProviderItemKey() != "tmdb:62085" ||
+		episode.GetMedia().GetExternalIds()["tmdb"] != "62085" ||
+		episode.GetMedia().GetSeriesExternalIds()["tmdb"] != "1396" ||
+		episode.GetMedia().GetSeasonNumber() != 1 || episode.GetMedia().GetEpisodeNumber() != 1 {
+		t.Fatalf("episode = %v", episode)
+	}
 	if avengers.GetMedia().GetMediaType() != mediaMovie || avengers.GetRating().GetRating() != 8 || avengers.GetProviderItemKey() != "imdb:tt0848228" ||
 		avengers.GetMedia().GetExternalIds()["imdb"] != "tt0848228" || avengers.GetMedia().GetExternalIds()["tmdb"] != "24428" ||
 		avengers.GetMedia().GetTitle() != "The Avengers" || avengers.GetMedia().GetYear() != 2012 ||
@@ -198,8 +208,8 @@ func TestListRatingsPagesByOffsetUntilTotal(t *testing.T) {
 	if !slices.Equal(requested, []string{"|", "|1000", "|2000"}) {
 		t.Fatalf("pages = %#v, want three offset pages", requested)
 	}
-	if len(result.items) != 1875 {
-		t.Fatalf("items = %d, want every rated movie and show", len(result.items))
+	if len(result.items) != 2500 {
+		t.Fatalf("items = %d, want every rated movie, show and episode", len(result.items))
 	}
 	// Offset pages can shift under a concurrent change, so the read imports
 	// what it saw but claims no snapshot, and says why.
@@ -235,7 +245,7 @@ func TestListRatingsShortOfTotal(t *testing.T) {
 				"|": ratingsPage(0, 1, 1, 1, `{"total":10,"limit":1000,"offset":0,"next_cursor":null}`),
 			},
 			wantPages: []string{"|", "|3"},
-			wantItems: 2,
+			wantItems: 3,
 		},
 		"legacy per-type totals": {
 			pages: map[string]string{
@@ -312,10 +322,13 @@ func TestListRatingsRepeatedEntry(t *testing.T) {
 			},
 			wantItems: 5,
 		},
+		// A rated season is counted but never becomes a rating row, because the
+		// plugin contract has no season media type. A repeat of one therefore
+		// shows the ratings changed without the read losing an item.
 		"offset read repeats an entry without a rating row": {
 			pages: map[string]string{
-				"|":  `{"movies":[{"rating":7,"movie":{"ids":{"tmdb":1}}}],"shows":[],"episodes":[{"rating":9,"episode":{"ids":{"tmdb":2}}}],"pagination":{"total":4,"limit":2,"offset":0,"next_cursor":null}}`,
-				"|2": `{"movies":[{"rating":7,"movie":{"ids":{"tmdb":4}}}],"shows":[],"episodes":[{"rating":9,"episode":{"ids":{"tmdb":2}}}],"pagination":{"total":4,"limit":2,"offset":2,"next_cursor":null}}`,
+				"|":  `{"movies":[{"rating":7,"movie":{"ids":{"tmdb":1}}}],"shows":[],"seasons":[{"rating":8,"season":{"number":1,"show":{"ids":{"tmdb":1396}}}}],"pagination":{"total":4,"limit":2,"offset":0,"next_cursor":null}}`,
+				"|2": `{"movies":[{"rating":7,"movie":{"ids":{"tmdb":4}}}],"shows":[],"seasons":[{"rating":8,"season":{"number":1,"show":{"ids":{"tmdb":1396}}}}],"pagination":{"total":4,"limit":2,"offset":2,"next_cursor":null}}`,
 			},
 			wantItems: 2,
 		},
@@ -328,8 +341,8 @@ func TestListRatingsRepeatedEntry(t *testing.T) {
 		},
 		"cursor read repeats an entry without a rating row": {
 			pages: map[string]string{
-				"|":   `{"movies":[],"shows":[],"episodes":[{"rating":9,"episode":{"ids":{"tmdb":2}}}],"pagination":{"total":3,"limit":1,"next_cursor":"c2"}}`,
-				"c2|": `{"movies":[{"rating":7,"movie":{"ids":{"tmdb":4}}}],"shows":[],"episodes":[{"rating":9,"episode":{"ids":{"tmdb":2}}}],"pagination":{"total":3,"limit":2,"next_cursor":null}}`,
+				"|":   `{"movies":[],"shows":[],"seasons":[{"rating":8,"season":{"number":1,"show":{"ids":{"tmdb":1396}}}}],"pagination":{"total":3,"limit":1,"next_cursor":"c2"}}`,
+				"c2|": `{"movies":[{"rating":7,"movie":{"ids":{"tmdb":4}}}],"shows":[],"seasons":[{"rating":8,"season":{"number":1,"show":{"ids":{"tmdb":1396}}}}],"pagination":{"total":3,"limit":2,"next_cursor":null}}`,
 			},
 			wantFault: true,
 		},
@@ -374,17 +387,18 @@ func TestListRatingsCarriesSeenEntriesAcrossManyCursorPages(t *testing.T) {
 	}
 	var requested []string
 	result := listAll(t, ratingsFake(t, pages, &requested), kindRating)
-	if result.fault != nil || !result.complete || len(result.items) != 4500 || len(requested) != 5 {
+	if result.fault != nil || !result.complete || len(result.items) != 5000 || len(requested) != 5 {
 		t.Fatalf("complete = %t fault = %v items = %d pages = %d", result.complete, result.fault, len(result.items), len(requested))
 	}
 }
 
 func TestSetRatingSendsRatingPayload(t *testing.T) {
 	var gotPath, gotMethod string
-	var gotBody []byte
+	var bodies [][]byte
 	s := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotMethod = r.URL.Path, r.Method
-		gotBody, _ = io.ReadAll(r.Body)
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, body)
 		writeJSON(w, `{"updated":{"movies":1,"shows":1},"not_found":{"movies":0,"shows":0},"errors":[]}`)
 	})
 	ratedAt := time.Date(2025, 10, 21, 16, 0, 0, 0, time.FixedZone("CEST", 2*60*60))
@@ -393,7 +407,8 @@ func TestSetRatingSendsRatingPayload(t *testing.T) {
 	show := seriesEvent("s1", setRating, nil)
 	show.ProviderItemKey = "tvdb:81189"
 	show.Rating = 10
-	episode := episodeEvent("e1", setRating, map[string]string{"tmdb": "62085"}, nil, 1, 1)
+	episode := episodeEvent("e1", setRating, map[string]string{"tmdb": "62085"},
+		map[string]string{"tvdb": "81189"}, 1, 1)
 	episode.Rating = 6
 	noIDs := movieEvent("m2", setRating, nil)
 	noIDs.Rating = 4
@@ -403,17 +418,82 @@ func TestSetRatingSendsRatingPayload(t *testing.T) {
 	if gotMethod != http.MethodPost || gotPath != "/sync/ratings" {
 		t.Fatalf("request = %s %s, want POST /sync/ratings", gotMethod, gotPath)
 	}
-	assertJSONEqual(t, gotBody, `{
+	// Two requests: the flat movie and show entries, then the episode nested
+	// in its show. Both reuse the "shows" key, so they cannot share one body.
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want the titles and then the episodes", len(bodies))
+	}
+	assertJSONEqual(t, bodies[0], `{
 		"movies":[{"ids":{"imdb":"tt0848228","tmdb":24428},"rating":8,"rated_at":"2025-10-21T14:00:00Z"}],
 		"shows":[{"ids":{"tvdb":81189},"rating":10}]
 	}`)
+	assertJSONEqual(t, bodies[1], `{
+		"shows":[{"ids":{"tvdb":81189},"seasons":[{"number":1,"episodes":[{"number":1,"rating":6}]}]}]
+	}`)
 	assertStatus(t, response, "m1", statusApplied)
 	assertStatus(t, response, "s1", statusApplied)
-	for _, id := range []string{"e1", "m2", "m3"} {
+	assertStatus(t, response, "e1", statusApplied)
+	// A title with no external ID and a rating outside 1 to 10 are rejected
+	// before the request is built.
+	for _, id := range []string{"m2", "m3"} {
 		result := assertStatus(t, response, id, statusRejected)
 		if result.GetFault().GetCode() != pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_INVALID_REQUEST {
 			t.Fatalf("%s fault = %v", id, result.GetFault())
 		}
+	}
+}
+
+// Several episodes of one season travel as a single show entry, and an
+// episode MDBList cannot be positioned in (no series ID, or no numbers) is
+// rejected rather than sent as an entry that would be ignored.
+func TestSetRatingGroupsEpisodesUnderTheirShow(t *testing.T) {
+	var gotBody []byte
+	s := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeJSON(w, `{"updated":{"shows":2},"not_found":{"shows":0},"errors":[]}`)
+	})
+	first := episodeEvent("e1", setRating, nil, map[string]string{"tvdb": "81189"}, 2, 7)
+	first.Rating = 9
+	second := episodeEvent("e2", setRating, nil, map[string]string{"tvdb": "81189"}, 2, 8)
+	second.Rating = 4
+	// Its own ID is no help: the write addresses an episode through its show.
+	noSeries := episodeEvent("e3", setRating, map[string]string{"tmdb": "62085"}, nil, 1, 1)
+	noSeries.Rating = 7
+	unnumbered := episodeEvent("e4", setRating, nil, map[string]string{"tvdb": "81189"}, 0, 0)
+	unnumbered.Rating = 5
+
+	response := applyEvents(t, s, first, second, noSeries, unnumbered)
+
+	assertJSONEqual(t, gotBody, `{
+		"shows":[{"ids":{"tvdb":81189},"seasons":[{"number":2,"episodes":[
+			{"number":7,"rating":9},{"number":8,"rating":4}
+		]}]}]
+	}`)
+	assertStatus(t, response, "e1", statusApplied)
+	assertStatus(t, response, "e2", statusApplied)
+	for _, id := range []string{"e3", "e4"} {
+		result := assertStatus(t, response, id, statusRejected)
+		if result.GetFault().GetCode() != pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_INVALID_REQUEST {
+			t.Fatalf("%s fault = %v", id, result.GetFault())
+		}
+	}
+}
+
+// MDBList ignores a payload shape it does not recognise without reporting an
+// error, so a request it accepted while recording nothing must not be read as
+// applied: Silo would store the rating as agreed and never send it again.
+func TestSetRatingFailsWhenMDBListRecordsNothing(t *testing.T) {
+	s := newTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, `{"updated":{"movies":0,"shows":0},"not_found":{},"errors":[]}`)
+	})
+	movie := movieEvent("m1", setRating, map[string]string{"imdb": "tt0848228"})
+	movie.Rating = 8
+
+	response := applyEvents(t, s, movie)
+
+	result := assertStatus(t, response, "m1", statusRetry)
+	if result.GetFault().GetCode() != pluginv1.WatchSyncFaultCode_WATCH_SYNC_FAULT_CODE_TEMPORARY {
+		t.Fatalf("m1 fault = %v, want TEMPORARY so the next sync retries", result.GetFault())
 	}
 }
 

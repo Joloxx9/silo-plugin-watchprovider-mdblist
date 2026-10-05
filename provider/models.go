@@ -279,6 +279,30 @@ func (u mdblistUser) accountID() string {
 type mdblistWriteResponse struct {
 	NotFound json.RawMessage `json:"not_found"`
 	Errors   json.RawMessage `json:"errors"`
+	// Per-kind counts of what the request changed. MDBList reports them for
+	// rating writes; a kind it does not recognise is simply absent, which is
+	// how an ignored payload is told apart from an applied one.
+	Updated  map[string]int `json:"updated"`
+	Added    map[string]int `json:"added"`
+	Existing map[string]int `json:"existing"`
+	Removed  map[string]int `json:"removed"`
+}
+
+// counts reports whether the response carried any per-kind counts, and whether
+// they add up to something. "existing" counts as acted on: resending a rating
+// MDBList already holds is a no-op, not a failure.
+func (r mdblistWriteResponse) counts() (reported bool, acted bool) {
+	total := 0
+	for _, group := range []map[string]int{r.Updated, r.Added, r.Existing, r.Removed} {
+		if group == nil {
+			continue
+		}
+		reported = true
+		for _, n := range group {
+			total += n
+		}
+	}
+	return reported, total > 0
 }
 
 type mdblistWatchedPayload struct {

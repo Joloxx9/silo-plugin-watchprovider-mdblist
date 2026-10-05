@@ -13,7 +13,7 @@
       "type": "watch_sync_provider.v1",
       "id": "mdblist",
       "display_name": "MDBList",
-      "description": "Two-way watch history, watchlist, and movie and series ratings, resume progress import, and live scrobbling for an MDBList account.",
+      "description": "Two-way watch history, watchlist, and movie, series and episode ratings, resume progress import, and live scrobbling for an MDBList account.",
       "watch_sync_provider": {
         "auth_methods": ["WATCH_SYNC_AUTH_METHOD_API_KEY"],
         "import_watched": true,
@@ -41,7 +41,7 @@
   "presentation": {
     "display_name": "MDBList Watch Provider",
     "summary": "Sync Silo watch history, watchlists, and ratings with MDBList.",
-    "description_markdown": "Imports and exports movie and episode watch history, imports resume progress, syncs the MDBList watchlist in its own order, syncs movie and series ratings in both directions, and forwards live playback start, pause, and stop events.",
+    "description_markdown": "Imports and exports movie and episode watch history, imports resume progress, syncs the MDBList watchlist in its own order, syncs movie, series and episode ratings in both directions, and forwards live playback start, pause, and stop events.",
     "setup_markdown": "Each Silo profile connects with its own MDBList API key, created on the API page of your [MDBList preferences](https://mdblist.com/preferences/#api). The plugin needs no server-wide settings.\n\nMDBList's free tier allows 1,000 requests a day. The plugin paces requests to about one a second per key, and when MDBList reports the limit, Silo waits before the next sync.",
     "homepage_url": "https://mdblist.com",
     "source_url": "https://github.com/Silo-Server/silo-plugin-watchprovider-mdblist",

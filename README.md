@@ -8,7 +8,7 @@ Syncs Silo profiles with an [MDBList](https://mdblist.com) account through Silo'
 - Exports completed movie and episode watches, and marks titles unwatched.
 - Imports resume progress from paused MDBList playback sessions.
 - Imports, exports, and removes watchlist movies and series, and keeps MDBList's watchlist order.
-- Imports and exports movie and series ratings, including removals.
+- Imports and exports movie, series and episode ratings, including removals.
 - Sends live playback start, pause, and stop events.
 
 MDBList has one personal list, its watchlist, so the plugin syncs it with Silo's watchlist and does not advertise favorites.
@@ -25,7 +25,7 @@ Silo stores the key encrypted with the profile's connection. The plugin sends it
 - **Watch history import** reads the whole MDBList play history on every sync. MDBList's show and season rows only summarize episode state, so the plugin imports movie and episode plays and lets Silo work out season and series completion.
 - **Watch history export** first reads MDBList's plays from a day before the earliest play in the batch. A play MDBList already holds at the same second is reported as unchanged and not written again. MDBList also folds a written play into a nearby existing one, so a retried export does not create a duplicate play. The read stops after two pages (2,000 plays) so a backlog of old plays does not spend the daily quota; when it stops early or fails, the plugin writes the plays and relies on that folding.
 - **Watchlist import** returns the full watchlist in MDBList's order on every sync, so Silo can mirror the order and treat missing titles as removed.
-- **Ratings import** reads every movie and show rating. Silo treats a rating missing from a complete read as removed, so the plugin claims a complete read only when it can trust one:
+- **Ratings import** reads every movie, show and episode rating. Season ratings are skipped: Silo's plugin contract has no season media type, so a season rating cannot be named and Silo does not offer one. Silo treats a rating missing from a complete read as removed, so the plugin claims a complete read only when it can trust one:
   - A read that MDBList pages by offset, or one without a shows list, is imported without removals, because offsets shift when ratings change during the read.
   - When a cursor-paged read repeats an entry or ends short of the total MDBList reported, ratings changed during the read. The plugin abandons that read, and the next sync reads every rating again.
   - A rated title with only MDBList's own ID could be any local title. Silo skips it and handles no removals of that kind in that sync.
